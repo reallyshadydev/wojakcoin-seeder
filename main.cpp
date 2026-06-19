@@ -22,6 +22,7 @@ public:
   int nPort;
   int nP2Port;
   int nMinimumHeight;
+  int nMinVersion;
   int nDnsThreads;
   int fUseTestNet;
   int fWipeBan;
@@ -37,7 +38,7 @@ public:
   std::vector<string> vSeeds;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), nMinVersion(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
 
   void ParseCommandLine(int argc, char **argv) {
     static const char *help = "WojakCoin-seeder (multi-instance DNS seeder / crawler)\n"
@@ -59,6 +60,7 @@ public:
                               "--p2port <port> P2P port to connect to\n"
                               "--magic <hex>   Magic string/network prefix\n"
                               "--minheight <n> Minimum height of block chain\n"
+                              "--minversion <n> Minimum peer protocol version to serve\n"
                               "--testnet       Use testnet\n"
                               "--wipeban       Wipe list of banned nodes\n"
                               "--wipeignore    Wipe list of ignored nodes\n"
@@ -83,6 +85,7 @@ public:
         {"p2port", required_argument, 0, 'b'},
         {"magic", required_argument, 0, 'q'},
         {"minheight", required_argument, 0, 'x'},
+        {"minversion", required_argument, 0, 'v'},
         {"testnet", no_argument, &fUseTestNet, 1},
         {"wipeban", no_argument, &fWipeBan, 1},
         {"wipeignore", no_argument, &fWipeBan, 1},
@@ -90,7 +93,7 @@ public:
         {0, 0, 0, 0}
       };
       int option_index = 0;
-      int c = getopt_long(argc, argv, "s:h:n:m:t:a:p:d:o:i:k:w:b:q:x:", long_options, &option_index);
+      int c = getopt_long(argc, argv, "s:h:n:m:t:a:p:d:o:i:k:w:b:q:x:v:", long_options, &option_index);
       if (c == -1) break;
       switch (c) {
         case 's': {
@@ -195,6 +198,12 @@ public:
         case 'x': {
           int n = strtol(optarg, NULL, 10);
           if (n > 0 && n <= 0x7fffffff) nMinimumHeight = n;
+          break;
+        }
+
+        case 'v': {
+          int n = strtol(optarg, NULL, 10);
+          if (n > 0 && n <= 0x7fffffff) nMinVersion = n;
           break;
         }
 
@@ -560,6 +569,10 @@ int main(int argc, char **argv) {
   if (opts.nMinimumHeight) {
     printf("Using minimum height %i\n", opts.nMinimumHeight);
     nMinimumHeight = opts.nMinimumHeight;
+  }
+  if (opts.nMinVersion) {
+    printf("Using minimum peer protocol version %i\n", opts.nMinVersion);
+    nMinPeerVersion = opts.nMinVersion;
   }
   if (!opts.vSeeds.empty()) {
     printf("Overriding DNS seeds\n");

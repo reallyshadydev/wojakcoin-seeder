@@ -4,6 +4,7 @@
 using namespace std;
 
 int nMinimumHeight = 0;
+int nMinPeerVersion = 70001;
 
 void CAddrInfo::Update(bool good) {
   uint32_t now = time(NULL);

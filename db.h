@@ -12,10 +12,10 @@
 
 #define MIN_RETRY 1000
 
-// Minimum protocol version a peer must advertise to be served. WojakCoin's
-// PROTOCOL_VERSION is 70012 and MIN_PEER_PROTO_VERSION is 31800; 70001 keeps us
-// inclusive of every current node while still filtering ancient clients.
-#define REQUIRE_VERSION 70001
+// Minimum protocol version a peer must advertise to be served as "good". Runtime
+// configurable via --minversion (per chain): WojakCoin uses ~70001, Pepecoin 70003.
+// Default 70001 stays inclusive of current nodes while filtering ancient clients.
+extern int nMinPeerVersion;
 
 extern int nMinimumHeight;
 static inline int GetRequireHeight(const bool testnet = fTestNet)
@@ -111,7 +111,7 @@ public:
     if (ip.GetPort() != GetDefaultPort()) return false;
     if (!(services & NODE_NETWORK)) return false;
     if (!ip.IsRoutable()) return false;
-    if (clientVersion && clientVersion < REQUIRE_VERSION) return false;
+    if (clientVersion && clientVersion < nMinPeerVersion) return false;
     if (blocks && blocks < GetRequireHeight()) return false;
 
     if (total <= 3 && success * 2 >= total) return true;

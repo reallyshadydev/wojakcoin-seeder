@@ -60,7 +60,12 @@ class CDataStream;
 class CAutoFile;
 static const unsigned int MAX_SIZE = 0x02000000;
 
-static const int PROTOCOL_VERSION = 60000;
+// Protocol version this seeder advertises in its version message. Must be >= the
+// target chain's MIN_PEER_PROTO_VERSION or peers reject us. Bumped from upstream's
+// 60000 so high-minimum chains accept us (e.g. Pepecoin requires >= 70003).
+// Peers always accept a version >= their minimum, so advertising high is safe; the
+// wire stream is still capped to min(ourVersion, peerVersion) per connection.
+static const int PROTOCOL_VERSION = 70016;
 
 // Used to bypass the rule against non-const reference to temporary
 // where it makes sense with wrappers such as CFlatData or CTxDB
