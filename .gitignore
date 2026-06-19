@@ -1,0 +1,12 @@
+*.o
+dnsseed*
+dnsstats.log
+
+# runtime state
+/data/
+
+# export-chainparams-seeds.py output
+/export/
+nodes_main.txt
+chainparamsseeds.snippet.h
+
