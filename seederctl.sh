@@ -2,6 +2,7 @@
 # Control the single multi-chain seeder process (all chains from seeder.conf at once).
 #
 # Usage: ./seederctl.sh {start|stop|restart|status|run}
+#        ./seederctl.sh add <name> --src <coin-src> [--cli "..."]
 #        ./seederctl.sh export <chain> [extra args for the export tool]
 #
 #   start    launch ONE dnsseed process serving every chain in seeder.conf (background)
@@ -9,6 +10,7 @@
 #   restart  stop then start
 #   status   per-chain good/tracked node counts
 #   run      run in the foreground (Ctrl-C) — good for testing / systemd
+#   add      scaffold a new chain into seeder.conf from a coin's source tree
 #   export   turn a chain's crawler dump into chainparams IP seeds
 set -euo pipefail
 
@@ -71,6 +73,13 @@ case "${1:-}" in
       fi
     done
     ;;
+  add)
+    # Scaffold a new chain into seeder.conf from a coin's source tree (and optional daemon).
+    # e.g. ./seederctl.sh add dogecoin --src /root/dogecoin-1.14.9
+    shift
+    [ -n "${1:-}" ] || { echo "usage: $0 add <name> --src <coin-src> [--cli \"...\" --minheight N ...]"; exit 2; }
+    python3 "$DIR/tools/add-chain.py" "$@" --conf "$CONF"
+    ;;
   export)
     chain="${2:-}"; [ -n "$chain" ] || { echo "usage: $0 export <chain>"; exit 2; }
     dump="$DATA/$chain/dnsseed.dump"
@@ -80,6 +89,7 @@ case "${1:-}" in
     ;;
   *)
     echo "usage: $0 {start|stop|restart|status|run}"
+    echo "       $0 add <name> --src <coin-src> [--cli \"...\"]"
     echo "       $0 export <chain> [extra args]"
     echo "chains in $CONF: $(chains | tr '\n' ' ')"
     exit 2

@@ -20,10 +20,11 @@ extern thread_local int nMinPeerVersion;
 extern thread_local int nMinimumHeight;
 static inline int GetRequireHeight(const bool testnet = fTestNet)
 {
-    // A peer must report at least this block height to count as "good". The
-    // WojakCoin mainnet tip is ~139k (2026), so 130000 admits well-synced nodes
-    // while rejecting badly-behind ones. Bump with --minheight as the chain grows.
-    return nMinimumHeight ? nMinimumHeight : (testnet ? 1 : 130000);
+    // Per-chain minimum block height for a peer to count as "good". 0 disables the
+    // height filter, so a chain can be added without knowing its current tip; set
+    // 'minheight' in seeder.conf (a bit below the tip) to reject badly-behind nodes.
+    (void)testnet;
+    return nMinimumHeight;
 }
 
 std::string static inline ToString(const CService &ip) {

@@ -79,7 +79,10 @@ class CNode {
     int64 nLocalServices = 0;
     CAddress me(CService("0.0.0.0"));
     BeginMessage("version");
+    // Height we claim in our version message. When no per-chain minheight is set
+    // (GetRequireHeight()==0) advertise a large value so peers don't deprioritize us.
     int nBestHeight = GetRequireHeight();
+    if (nBestHeight <= 0) nBestHeight = 100000000;
     string ver = "/multicoin-seeder:0.01/";
     uint8_t fRelayTxs = 0;
     vSend << PROTOCOL_VERSION << nLocalServices << nTime << you << me << nLocalNonce << ver << nBestHeight << fRelayTxs;

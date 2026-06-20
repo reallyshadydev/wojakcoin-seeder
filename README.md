@@ -86,11 +86,26 @@ mbox       =
 
 ### Adding a chain
 
-1. Add a new `[mycoin]` section to `seeder.conf`.
-2. Fill `magic` / `port` from the coin's `src/chainparams.cpp` (mainnet) and `minversion`
-   from its `src/version.h` (`MIN_PEER_PROTO_VERSION`); set `seeds` and a `minheight` below
-   the current tip.
-3. `./seederctl.sh restart`.
+The fast way — scaffold it straight from the coin's source tree:
+
+```bash
+./seederctl.sh add <name> --src /path/to/coin-source
+./seederctl.sh restart
+```
+
+`add` reads `magic` / `port` / DNS `seeds` from the coin's mainnet `chainparams.cpp` and
+`minversion` from `version.h` (resolving named constants like `GETHEADERS_VERSION`), then
+appends a `[<name>]` section to `seeder.conf`. Pass a working daemon to also fill a sensible
+`minheight` and pull a few live seed IPs:
+
+```bash
+./seederctl.sh add mycoin --src /path/to/mycoin \
+    --cli "/path/to/mycoin-cli -rpcport=NNNN -rpcuser=U -rpcpassword=P"
+```
+
+Or just add a `[section]` by hand — **only `magic`, `port` and `seeds` are required**;
+`minheight` and `minversion` are optional (omit either to disable that filter). If parsing
+misses something, override with `--magic` / `--port` / `--seeds`.
 
 > **Protocol-version gotcha.** The seeder advertises protocol version `70016`
 > (`PROTOCOL_VERSION` in `serialize.h`). A peer accepts us only if that is `>=` its
@@ -146,9 +161,10 @@ rebuild the wallet. (The tool only generates text; applying it is a separate man
 dnsseed                       the built binary (serves all chains)
 Makefile  *.cpp  *.h          source (forked sipa/bitcoin-seeder, made multi-chain)
 seeder.conf                   chains config: one [section] per coin
-seederctl.sh                  start|stop|restart|status|run, and export <chain>
+seederctl.sh                  start|stop|restart|status|run|add|export
 data/<chain>/                 per-chain state: dnsseed.dat/dump + export/; data/dnsseed.log
 contrib/seeder.service        optional systemd unit (single process)
+tools/add-chain.py            scaffold a [section] from a coin's source tree
 tools/export-chainparams-seeds.py   crawler dump  ->  chainparams IP seeds
 README / README.md            upstream reference / this file
 ```
@@ -160,8 +176,10 @@ README / README.md            upstream reference / this file
   a multi-chain config and launches everything (`CChain`, `applyChain()`, `LoadConfig()`).
 * `serialize.h` — advertised `PROTOCOL_VERSION` `60000` → `70016` so high-minimum chains
   (e.g. Pepecoin, min 70003) accept the seeder.
-* `db.h`/`main.cpp` — `REQUIRE_VERSION` #define → per-chain `minversion`.
-* `GetRequireHeight()` default lowered; per-chain `minheight`.
+* `db.h`/`main.cpp` — `REQUIRE_VERSION` #define → per-chain `minversion` (optional).
+* `GetRequireHeight()` → per-chain `minheight`, `0` = no height filter (optional), so a
+  chain can be added without knowing its tip; `bitcoin.cpp` advertises a caught-up height
+  when none is set.
 * `bitcoin.cpp` — subversion string → `/multicoin-seeder:0.01/`.
-* Added: `seeder.conf`, `seederctl.sh`, `tools/export-chainparams-seeds.py`,
-  `contrib/seeder.service`.
+* Added: `seeder.conf`, `seederctl.sh` (incl. `add`), `tools/add-chain.py`,
+  `tools/export-chainparams-seeds.py`, `contrib/seeder.service`.
