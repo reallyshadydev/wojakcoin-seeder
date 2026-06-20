@@ -22,11 +22,10 @@ static const char* ppszTypeName[] =
     "block",
 };
 
-unsigned short nDefaultP2Port = 0;
-
-// WojakCoin mainnet message-start (magic) bytes, from wojakcore chainparams.cpp.
-// Overridable at runtime with --magic; testnet magic is set in main.cpp.
-unsigned char pchMessageStart[4] = { 0x6f, 0x8d, 0xa5, 0x79 };
+// Per-chain, thread_local (see protocol.h). Each chain's worker threads set these
+// at startup via applyChain(); the defaults below are only used before that.
+thread_local unsigned short nDefaultP2Port = 0;
+thread_local unsigned char pchMessageStart[4] = { 0x6f, 0x8d, 0xa5, 0x79 };
 
 CMessageHeader::CMessageHeader()
 {

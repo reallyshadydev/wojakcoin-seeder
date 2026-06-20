@@ -1,108 +1,87 @@
 #!/usr/bin/env bash
-# Control the multi-chain DNS seeder on this server.
+# Control the single multi-chain seeder process (all chains from seeder.conf at once).
 #
-# Usage: ./seederctl.sh <chain> {start|stop|restart|status|run|export}
-#        ./seederctl.sh list
+# Usage: ./seederctl.sh {start|stop|restart|status|run}
+#        ./seederctl.sh export <chain> [extra args for the export tool]
 #
-#   <chain>   name of a preset in chains/<chain>.conf (e.g. wojakcoin, pepecoin)
-#   start     launch the seeder for <chain> in the background (nohup + pidfile)
-#   stop      stop the background seeder for <chain>
-#   restart   stop then start
-#   status    show pid + good/tracked node counts for <chain>
-#   run       run in the foreground (Ctrl-C to quit) — good for testing / systemd
-#   export    turn this chain's crawler dump into chainparams IP seeds
-#
-# Each chain gets its own state dir: data/<chain>/ (dnsseed.dat/dump/log/pid).
-# Run several chains at once by starting each: ./seederctl.sh pepecoin start, etc.
+#   start    launch ONE dnsseed process serving every chain in seeder.conf (background)
+#   stop     stop it
+#   restart  stop then start
+#   status   per-chain good/tracked node counts
+#   run      run in the foreground (Ctrl-C) — good for testing / systemd
+#   export   turn a chain's crawler dump into chainparams IP seeds
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/dnsseed"
-EXPORT_TOOL="$DIR/tools/export-chainparams-seeds.py"
-
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-
-if [ "${1:-}" = "list" ]; then
-  echo "Available chains:"; ls "$DIR/chains"/*.conf 2>/dev/null | sed 's#.*/##; s#\.conf$##; s/^/  /' || echo "  (none)"
-  exit 0
-fi
-
-CHAIN="${1:-}"; CMD="${2:-}"
-[ -z "$CHAIN" ] || [ -z "$CMD" ] && usage
-CONF="$DIR/chains/$CHAIN.conf"
-[ -f "$CONF" ] || { echo "No such chain preset: $CONF"; echo "Try: $0 list"; exit 1; }
-
-DATA="$DIR/data/$CHAIN"
+CONF="$DIR/seeder.conf"
+DATA="$DIR/data"
 PIDFILE="$DATA/dnsseed.pid"
 LOG="$DATA/dnsseed.log"
-DUMP="$DATA/dnsseed.dump"
-
-load_conf() {
-  # defaults, overridden by the chain preset
-  CHAIN=""; MAGIC=""; P2PORT=""; MINHEIGHT=""; MINVERSION=""; SEEDS=""
-  HOST=""; NS=""; MBOX=""; DNSPORT="53"; LISTEN="::"; THREADS="64"
-  # shellcheck disable=SC1090
-  source "$CONF"
-  [ -n "$MAGIC" ] && [ -n "$P2PORT" ] || { echo "$CONF must set MAGIC and P2PORT"; exit 1; }
-}
-
-build_args() {
-  load_conf
-  ARGS=( -t "$THREADS" -a "$LISTEN" -p "$DNSPORT" --magic "$MAGIC" --p2port "$P2PORT" )
-  [ -n "$MINHEIGHT" ]  && ARGS+=( --minheight "$MINHEIGHT" )
-  [ -n "$MINVERSION" ] && ARGS+=( --minversion "$MINVERSION" )
-  for s in $SEEDS; do ARGS+=( -s "$s" ); done
-  if [ -n "$HOST" ] && [ -n "$NS" ]; then
-    ARGS+=( -h "$HOST" -n "$NS" )
-    [ -n "$MBOX" ] && ARGS+=( -m "$MBOX" )
-    MODE="DNS seed for '$HOST' on port $DNSPORT (magic $MAGIC, p2p $P2PORT)"
-  else
-    MODE="crawler-only (magic $MAGIC, p2p $P2PORT; set HOST/NS in $CONF for DNS)"
-  fi
-}
+EXPORT_TOOL="$DIR/tools/export-chainparams-seeds.py"
 
 is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
-need_bin()  { [ -x "$BIN" ] || { echo "Binary not built. Run 'make' first."; exit 1; }; }
+need_bin()   { [ -x "$BIN" ] || { echo "Binary not built. Run 'make' first."; exit 1; }; }
 
-case "$CMD" in
+# List the [chain] section names in seeder.conf.
+chains() { grep -oE '^\s*\[[^]]+\]' "$CONF" | tr -d '[] \t'; }
+
+# Read a key's value from a given [chain] section of seeder.conf.
+conf_get() { # conf_get <chain> <key>
+  awk -F= -v sec="[$1]" -v key="$2" '
+    { line=$0; gsub(/^[ \t]+|[ \t]+$/,"",line) }
+    line==sec { inblk=1; next }
+    line ~ /^\[/ { inblk=0 }
+    inblk { k=$1; gsub(/[ \t]/,"",k); if (k==key) { v=$2; gsub(/^[ \t]+|[ \t]+$/,"",v); print v; exit } }
+  ' "$CONF"
+}
+
+case "${1:-}" in
   run)
-    need_bin; mkdir -p "$DATA"; build_args
-    echo "[$CHAIN] mode: $MODE"
-    echo "[$CHAIN] exec: dnsseed ${ARGS[*]}"
-    cd "$DATA"; exec "$BIN" "${ARGS[@]}"
+    need_bin; mkdir -p "$DATA"
+    echo "chains: $(chains | tr '\n' ' ')"
+    cd "$DIR"; exec "$BIN" -c "$CONF" --datadir "$DATA"
     ;;
   start)
     need_bin
-    if is_running; then echo "[$CHAIN] already running (pid $(cat "$PIDFILE"))"; exit 0; fi
-    mkdir -p "$DATA"; build_args
-    cd "$DATA"
-    nohup "$BIN" "${ARGS[@]}" >> "$LOG" 2>&1 &
+    if is_running; then echo "already running (pid $(cat "$PIDFILE"))"; exit 0; fi
+    mkdir -p "$DATA"; cd "$DIR"
+    nohup "$BIN" -c "$CONF" --datadir "$DATA" >> "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
-    echo "[$CHAIN] started (pid $(cat "$PIDFILE")) — $MODE"
-    echo "[$CHAIN] log: $LOG"
+    echo "started (pid $(cat "$PIDFILE")) — chains: $(chains | tr '\n' ' ')"
+    echo "log: $LOG"
     ;;
   stop)
-    if is_running; then kill "$(cat "$PIDFILE")" && echo "[$CHAIN] stopped (pid $(cat "$PIDFILE"))"; else echo "[$CHAIN] not running"; fi
+    if is_running; then kill "$(cat "$PIDFILE")" && echo "stopped (pid $(cat "$PIDFILE"))"; else echo "not running"; fi
     rm -f "$PIDFILE"
     ;;
   restart)
-    "$0" "$CHAIN" stop || true; sleep 1; "$0" "$CHAIN" start
+    "$0" stop || true; sleep 1; "$0" start
     ;;
   status)
-    if is_running; then echo "[$CHAIN] state: running (pid $(cat "$PIDFILE"))"; else echo "[$CHAIN] state: stopped"; fi
-    if [ -f "$DUMP" ]; then
-      good=$(awk 'NR>1 && $2==1{c++} END{print c+0}' "$DUMP")
-      tot=$(awk 'NR>1{c++} END{print c+0}' "$DUMP")
-      echo "[$CHAIN] nodes: $good good / $tot tracked  ($DUMP)"
-    else
-      echo "[$CHAIN] nodes: no dnsseed.dump yet (written ~100s after start)"
-    fi
+    if is_running; then echo "state: running (pid $(cat "$PIDFILE"))"; else echo "state: stopped"; fi
+    for c in $(chains); do
+      dump="$DATA/$c/dnsseed.dump"
+      if [ -f "$dump" ]; then
+        good=$(awk 'NR>1 && $2==1{g++} END{print g+0}' "$dump")
+        tot=$(awk 'NR>1{t++} END{print t+0}' "$dump")
+        printf "  %-12s %s good / %s tracked\n" "$c" "$good" "$tot"
+      else
+        printf "  %-12s no dump yet (written ~100s after start)\n" "$c"
+      fi
+    done
     ;;
   export)
-    [ -f "$DUMP" ] || { echo "[$CHAIN] no dump at $DUMP — start the crawler first"; exit 1; }
-    load_conf
-    out="$DATA/export"
-    python3 "$EXPORT_TOOL" "$DUMP" --port "$P2PORT" --outdir "$out" "${@:3}"
+    chain="${2:-}"; [ -n "$chain" ] || { echo "usage: $0 export <chain>"; exit 2; }
+    dump="$DATA/$chain/dnsseed.dump"
+    [ -f "$dump" ] || { echo "no dump at $dump — is '$chain' a configured chain that has been running?"; exit 1; }
+    port="$(conf_get "$chain" port)"; [ -n "$port" ] || { echo "no port for chain '$chain' in $CONF"; exit 1; }
+    python3 "$EXPORT_TOOL" "$dump" --port "$port" --outdir "$DATA/$chain/export" "${@:3}"
     ;;
-  *) usage ;;
+  *)
+    echo "usage: $0 {start|stop|restart|status|run}"
+    echo "       $0 export <chain> [extra args]"
+    echo "chains in $CONF: $(chains | tr '\n' ' ')"
+    exit 2
+    ;;
 esac

@@ -16,7 +16,10 @@
 #include "uint256.h"
 
 extern bool fTestNet;
-extern unsigned short nDefaultP2Port;
+// Per-chain network state. thread_local so one process can crawl several chains
+// concurrently: each chain's worker threads set these once at startup and never
+// collide with another chain's threads. See applyChain() in main.cpp.
+extern thread_local unsigned short nDefaultP2Port;
 static inline unsigned short GetDefaultPort(const bool testnet = fTestNet)
 {
     // WojakCoin default P2P ports (wojakcore chainparams.cpp). Overridable with --p2port.
@@ -30,7 +33,7 @@ static inline unsigned short GetDefaultPort(const bool testnet = fTestNet)
 //  (4) size
 //  (4) checksum
 
-extern unsigned char pchMessageStart[4];
+extern thread_local unsigned char pchMessageStart[4];
 
 class CMessageHeader
 {

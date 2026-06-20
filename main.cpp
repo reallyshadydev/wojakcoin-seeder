@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <getopt.h>
 #include <atomic>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <sys/stat.h>
 
 #include "bitcoin.h"
 #include "db.h"
@@ -35,16 +39,23 @@ public:
   const char *ipv4_proxy;
   const char *ipv6_proxy;
   const char *magic;
+  const char *config;
+  const char *datadir;
   std::vector<string> vSeeds;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), nMinVersion(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), nMinVersion(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL), config("seeder.conf"), datadir("data") {}
 
   void ParseCommandLine(int argc, char **argv) {
-    static const char *help = "WojakCoin-seeder (multi-instance DNS seeder / crawler)\n"
-                              "Usage: %s -h <host> -n <ns> [-m <mbox>] [-t <threads>] [-p <port>]\n"
+    static const char *help = "multicoin-seeder (multi-chain DNS seeder / crawler)\n"
+                              "Usage: %s -c <config> [-t <threads>] [-d <dnsthreads>] [--datadir <dir>]\n"
+                              "\n"
+                              "Chains (magic/port/seeds/host/...) are defined in the config file, one\n"
+                              "[section] per chain; all run together in this single process.\n"
                               "\n"
                               "Options:\n"
+                              "-c <config>     Config file with [chain] sections (default seeder.conf)\n"
+                              "--datadir <dir> Base dir for per-chain state (default data)\n"
                               "-s <seed>       Seed node to collect peers from (replaces default)\n"
                               "-h <host>       Hostname of the DNS seed\n"
                               "-n <ns>         Hostname of the nameserver\n"
@@ -86,6 +97,8 @@ public:
         {"magic", required_argument, 0, 'q'},
         {"minheight", required_argument, 0, 'x'},
         {"minversion", required_argument, 0, 'v'},
+        {"config", required_argument, 0, 'c'},
+        {"datadir", required_argument, 0, 'D'},
         {"testnet", no_argument, &fUseTestNet, 1},
         {"wipeban", no_argument, &fWipeBan, 1},
         {"wipeignore", no_argument, &fWipeBan, 1},
@@ -93,7 +106,7 @@ public:
         {0, 0, 0, 0}
       };
       int option_index = 0;
-      int c = getopt_long(argc, argv, "s:h:n:m:t:a:p:d:o:i:k:w:b:q:x:v:", long_options, &option_index);
+      int c = getopt_long(argc, argv, "s:h:n:m:t:a:p:d:o:i:k:w:b:q:x:v:c:D:", long_options, &option_index);
       if (c == -1) break;
       switch (c) {
         case 's': {
@@ -207,6 +220,16 @@ public:
           break;
         }
 
+        case 'c': {
+          config = optarg;
+          break;
+        }
+
+        case 'D': {
+          datadir = optarg;
+          break;
+        }
+
         case '?': {
           showHelp = true;
           break;
@@ -236,18 +259,52 @@ public:
 
 #include "dns.h"
 
-CAddrDb db;
+class CDnsThread; // forward decl (CChain holds pointers to these)
+
+// One crawled network. All per-chain state lives here so a single process can run
+// several chains at once; each chain gets its own db and its own worker threads.
+struct CChain {
+  std::string name;
+  unsigned char magic[4];
+  unsigned short port;
+  int minHeight;
+  int minVersion;
+  std::vector<std::string> seeds;
+  std::string host, ns, mbox, listen;
+  int dnsPort;
+  int nThreads;
+  int nDnsThreads;
+  std::string datadir;            // <basedir>/<name>, holds dnsseed.dat/dump/log
+  CAddrDb db;
+  std::vector<CDnsThread*> dnsThreads;
+  std::set<uint64_t> filter_whitelist;
+  CChain() : port(0), minHeight(0), minVersion(0), dnsPort(53), nThreads(64), nDnsThreads(4) {
+    memset(magic, 0, sizeof(magic));
+  }
+};
+
+// Point the thread_local network params at this chain. Call once at the top of every
+// thread that touches a chain (crawler/dns/dumper/seeder) before using its db.
+static void applyChain(const CChain* c) {
+  memcpy(pchMessageStart, c->magic, sizeof(pchMessageStart));
+  nDefaultP2Port = c->port;
+  nMinimumHeight = c->minHeight;
+  nMinPeerVersion = c->minVersion;
+}
+
+std::vector<CChain*> g_chains;
 
 extern "C" void* ThreadCrawler(void* data) {
-  int *nThreads=(int*)data;
+  CChain* chain = (CChain*)data;
+  applyChain(chain);
   do {
     std::vector<CServiceResult> ips;
     int wait = 5;
-    db.GetMany(ips, 16, wait);
+    chain->db.GetMany(ips, 16, wait);
     int64 now = time(NULL);
     if (ips.empty()) {
       wait *= 1000;
-      wait += rand() % (500 * *nThreads);
+      wait += rand() % (500 * chain->nThreads);
       Sleep(wait);
       continue;
     }
@@ -262,8 +319,8 @@ extern "C" void* ThreadCrawler(void* data) {
       bool getaddr = res.ourLastSuccess + 86400 < now;
       res.fGood = TestNode(res.service,res.nBanTime,res.nClientV,res.strClientV,res.nHeight,getaddr ? &addr : NULL, res.services);
     }
-    db.ResultMany(ips);
-    db.Add(addr);
+    chain->db.ResultMany(ips);
+    chain->db.Add(addr);
   } while(1);
   return nullptr;
 }
@@ -282,6 +339,7 @@ public:
 
   dns_opt_t dns_opt; // must be first
   const int id;
+  CChain* chain;
   std::map<uint64_t, FlagSpecificData> perflag;
   std::atomic<uint64_t> dbQueries;
   std::set<uint64_t> filterWhitelist;
@@ -297,7 +355,7 @@ public:
     thisflag.cacheHits++;
     if (force || thisflag.cacheHits * 400 > (thisflag.cache.size()*thisflag.cache.size()) || (thisflag.cacheHits*thisflag.cacheHits * 20 > thisflag.cache.size() && (now - thisflag.cacheTime > 5))) {
       set<CNetAddr> ips;
-      db.GetIPs(ips, requestedFlags, 1000, nets);
+      chain->db.GetIPs(ips, requestedFlags, 1000, nets);
       dbQueries++;
       thisflag.cache.clear();
       thisflag.nIPv4 = 0;
@@ -325,19 +383,19 @@ public:
     }
   }
 
-  CDnsThread(CDnsSeedOpts* opts, int idIn) : id(idIn) {
-    dns_opt.host = opts->host;
-    dns_opt.ns = opts->ns;
-    dns_opt.mbox = opts->mbox;
+  CDnsThread(CChain* chainIn, int idIn) : id(idIn), chain(chainIn) {
+    dns_opt.host = chain->host.c_str();
+    dns_opt.ns = chain->ns.c_str();
+    dns_opt.mbox = chain->mbox.c_str();
     dns_opt.datattl = 3600;
     dns_opt.nsttl = 40000;
     dns_opt.cb = GetIPList;
-    dns_opt.addr = opts->ip_addr;
-    dns_opt.port = opts->nPort;
+    dns_opt.addr = chain->listen.c_str();
+    dns_opt.port = chain->dnsPort;
     dns_opt.nRequests = 0;
     dbQueries = 0;
     perflag.clear();
-    filterWhitelist = opts->filter_whitelist;
+    filterWhitelist = chain->filter_whitelist;
   }
 
   void run() {
@@ -387,10 +445,9 @@ extern "C" int GetIPList(void *data, char *requestedHostname, addr_t* addr, int 
   return max;
 }
 
-vector<CDnsThread*> dnsThread;
-
 extern "C" void* ThreadDNS(void* arg) {
   CDnsThread *thread = (CDnsThread*)arg;
+  applyChain(thread->chain);
   thread->run();
   return nullptr;
 }
@@ -407,24 +464,30 @@ int StatCompare(const CAddrReport& a, const CAddrReport& b) {
   }
 }
 
-extern "C" void* ThreadDumper(void*) {
+extern "C" void* ThreadDumper(void* arg) {
+  CChain* chain = (CChain*)arg;
+  applyChain(chain);
+  std::string datPath  = chain->datadir + "/dnsseed.dat";
+  std::string datNew   = chain->datadir + "/dnsseed.dat.new";
+  std::string dumpPath = chain->datadir + "/dnsseed.dump";
+  std::string statPath = chain->datadir + "/dnsstats.log";
   int count = 0;
   do {
     Sleep(100000 << count); // First 100s, than 200s, 400s, 800s, 1600s, and then 3200s forever
     if (count < 5)
         count++;
     {
-      vector<CAddrReport> v = db.GetAll();
+      vector<CAddrReport> v = chain->db.GetAll();
       sort(v.begin(), v.end(), StatCompare);
-      FILE *f = fopen("dnsseed.dat.new","w+");
+      FILE *f = fopen(datNew.c_str(),"w+");
       if (f) {
         {
           CAutoFile cf(f);
-          cf << db;
+          cf << chain->db;
         }
-        rename("dnsseed.dat.new", "dnsseed.dat");
+        rename(datNew.c_str(), datPath.c_str());
       }
-      FILE *d = fopen("dnsseed.dump", "w");
+      FILE *d = fopen(dumpPath.c_str(), "w");
       fprintf(d, "# address                                        good  lastSuccess    %%(2h)   %%(8h)   %%(1d)   %%(7d)  %%(30d)  blocks      svcs  version\n");
       double stat[5]={0,0,0,0,0};
       for (vector<CAddrReport>::const_iterator it = v.begin(); it < v.end(); it++) {
@@ -437,7 +500,7 @@ extern "C" void* ThreadDumper(void*) {
         stat[4] += rep.uptime[4];
       }
       fclose(d);
-      FILE *ff = fopen("dnsstats.log", "a");
+      FILE *ff = fopen(statPath.c_str(), "a");
       fprintf(ff, "%llu %g %g %g %g %g\n", (unsigned long long)(time(NULL)), stat[0], stat[1], stat[2], stat[3], stat[4]);
       fclose(ff);
     }
@@ -452,46 +515,33 @@ extern "C" void* ThreadStats(void*) {
     time_t tim = time(NULL);
     struct tm *tmp = localtime(&tim);
     strftime(c, 256, "[%y-%m-%d %H:%M:%S]", tmp);
-    CAddrDbStats stats;
-    db.GetStats(stats);
-    if (first)
-    {
-      first = false;
-      printf("\n\n\n\x1b[3A");
+    if (!first)
+      printf("\x1b[%dA", (int)g_chains.size()); // move cursor up to the top of the block
+    first = false;
+    for (unsigned int ci=0; ci<g_chains.size(); ci++) {
+      CChain* ch = g_chains[ci];
+      CAddrDbStats stats;
+      ch->db.GetStats(stats);
+      uint64_t requests = 0;
+      for (unsigned int i=0; i<ch->dnsThreads.size(); i++)
+        requests += ch->dnsThreads[i]->dns_opt.nRequests;
+      printf("\x1b[2K%s %-12s %i/%i available (%i tried in %is, %i new, %i active), %i banned; %llu DNS req\n",
+             c, ch->name.c_str(), stats.nGood, stats.nAvail, stats.nTracked, stats.nAge, stats.nNew,
+             stats.nAvail - stats.nTracked - stats.nNew, stats.nBanned, (unsigned long long)requests);
     }
-    else
-      printf("\x1b[2K\x1b[u");
-    printf("\x1b[s");
-    uint64_t requests = 0;
-    uint64_t queries = 0;
-    for (unsigned int i=0; i<dnsThread.size(); i++) {
-      requests += dnsThread[i]->dns_opt.nRequests;
-      queries += dnsThread[i]->dbQueries;
-    }
-    printf("%s %i/%i available (%i tried in %is, %i new, %i active), %i banned; %llu DNS requests, %llu db queries", c, stats.nGood, stats.nAvail, stats.nTracked, stats.nAge, stats.nNew, stats.nAvail - stats.nTracked - stats.nNew, stats.nBanned, (unsigned long long)requests, (unsigned long long)queries);
     Sleep(1000);
   } while(1);
   return nullptr;
 }
 
-// WojakCoin bootstrap seeds. These mirror the fixed seeds embedded in wojakcore
-// chainparams.cpp (pnSeed6_main) plus the existing DNS seed. The crawler starts
-// from these and discovers the rest of the network via getaddr. Override with -s.
-static const string mainnet_seeds[] = {"103.133.25.201",
-                                       "159.223.90.59",
-                                       "207.244.232.43",
-                                       "wojak-seed.s3na.xyz",
-                                       ""};
-static const string testnet_seeds[] = {""};
-static const string *seeds = mainnet_seeds;
-static vector<string> vSeeds;
-
-extern "C" void* ThreadSeeder(void*) {
+extern "C" void* ThreadSeeder(void* arg) {
+  CChain* chain = (CChain*)arg;
+  applyChain(chain);
   vector<string> vDnsSeeds;
-  for (const string& seed: vSeeds) {
+  for (const string& seed: chain->seeds) {
     size_t len = seed.size();
     if (len > 6 && !seed.compare(len - 6, 6, ".onion")) {
-      db.Add(CService(seed.c_str(), GetDefaultPort()), true);
+      chain->db.Add(CService(seed.c_str(), GetDefaultPort()), true);
     } else {
       vDnsSeeds.push_back(seed);
     }
@@ -501,12 +551,70 @@ extern "C" void* ThreadSeeder(void*) {
       vector<CNetAddr> ips;
       LookupHost(seed.c_str(), ips);
       for (vector<CNetAddr>::iterator it = ips.begin(); it != ips.end(); it++) {
-        db.Add(CService(*it, GetDefaultPort()), true);
+        chain->db.Add(CService(*it, GetDefaultPort()), true);
       }
     }
     Sleep(1800000);
   } while(1);
   return nullptr;
+}
+
+static std::string trim(const std::string& s) {
+  size_t a = s.find_first_not_of(" \t\r\n");
+  if (a == std::string::npos) return "";
+  size_t b = s.find_last_not_of(" \t\r\n");
+  return s.substr(a, b - a + 1);
+}
+
+static bool parseMagic(const std::string& hex, unsigned char out[4]) {
+  if (hex.size() != 8) return false;
+  for (int i = 0; i < 4; i++) {
+    unsigned int b = 0;
+    if (sscanf(hex.c_str() + i*2, "%2x", &b) != 1) return false;
+    out[i] = (unsigned char)(b & 0xff);
+  }
+  return true;
+}
+
+// Parse the multi-chain config: one [section] per chain, then key = value lines.
+static bool LoadConfig(const CDnsSeedOpts& opts, std::vector<CChain*>& chains) {
+  std::ifstream f(opts.config);
+  if (!f.is_open()) { fprintf(stderr, "Cannot open config file '%s'\n", opts.config); return false; }
+  std::string line;
+  CChain* cur = NULL;
+  while (std::getline(f, line)) {
+    std::string t = trim(line);
+    if (t.empty() || t[0] == '#' || t[0] == ';') continue;
+    if (t[0] == '[' && t[t.size()-1] == ']') {
+      cur = new CChain();
+      cur->name = trim(t.substr(1, t.size()-2));
+      cur->dnsPort = opts.nPort;
+      cur->listen = opts.ip_addr ? opts.ip_addr : "::";
+      cur->nThreads = opts.nThreads;
+      cur->nDnsThreads = opts.nDnsThreads;
+      cur->filter_whitelist = opts.filter_whitelist;
+      cur->datadir = std::string(opts.datadir) + "/" + cur->name;
+      chains.push_back(cur);
+      continue;
+    }
+    size_t eq = t.find('=');
+    if (eq == std::string::npos || !cur) continue;
+    std::string key = trim(t.substr(0, eq));
+    std::string val = trim(t.substr(eq + 1));
+    if (key == "magic") { if (!parseMagic(val, cur->magic)) fprintf(stderr, "[%s] bad magic '%s' (need 8 hex chars)\n", cur->name.c_str(), val.c_str()); }
+    else if (key == "port") cur->port = (unsigned short)atoi(val.c_str());
+    else if (key == "minheight") cur->minHeight = atoi(val.c_str());
+    else if (key == "minversion") cur->minVersion = atoi(val.c_str());
+    else if (key == "seeds") { std::istringstream iss(val); std::string s; while (iss >> s) cur->seeds.push_back(s); }
+    else if (key == "host") cur->host = val;
+    else if (key == "ns") cur->ns = val;
+    else if (key == "mbox") cur->mbox = val;
+    else if (key == "listen") cur->listen = val;
+    else if (key == "dnsport") cur->dnsPort = atoi(val.c_str());
+    else if (key == "threads") cur->nThreads = atoi(val.c_str());
+    else if (key == "dnsthreads") cur->nDnsThreads = atoi(val.c_str());
+  }
+  return true;
 }
 
 int main(int argc, char **argv) {
@@ -543,96 +651,59 @@ int main(int argc, char **argv) {
       SetProxy(NET_IPV6, service);
     }
   }
-  bool fDNS = true;
-  if (opts.fUseTestNet) {
-      printf("Using testnet.\n");
-      // WojakCoin testnet magic (wojakcore chainparams.cpp).
-      pchMessageStart[0] = 0x4d;
-      pchMessageStart[1] = 0xaa;
-      pchMessageStart[2] = 0x61;
-      pchMessageStart[3] = 0xf9;
-      seeds = testnet_seeds;
-      fTestNet = true;
-  }
-  if (opts.nP2Port) {
-    printf("Using P2P port %i\n", opts.nP2Port);
-    nDefaultP2Port = opts.nP2Port;
-  }
-  if (opts.magic) {
-    printf("Using magic %s\n", opts.magic);
-    for (int n=0; n<4; ++n) {
-      unsigned int c = 0;
-      sscanf(&opts.magic[n*2], "%2x", &c);
-      pchMessageStart[n] = (unsigned char) (c & 0xff);
-    }
-  }
-  if (opts.nMinimumHeight) {
-    printf("Using minimum height %i\n", opts.nMinimumHeight);
-    nMinimumHeight = opts.nMinimumHeight;
-  }
-  if (opts.nMinVersion) {
-    printf("Using minimum peer protocol version %i\n", opts.nMinVersion);
-    nMinPeerVersion = opts.nMinVersion;
-  }
-  if (!opts.vSeeds.empty()) {
-    printf("Overriding DNS seeds\n");
-    swap(opts.vSeeds, vSeeds);
-  } else {
-    for (int i=0; seeds[i][0]; i++) {
-      vSeeds.emplace_back(seeds[i]);
-    }
-  }
-  if (!opts.ns) {
-    printf("No nameserver set. Not starting DNS server.\n");
-    fDNS = false;
-  }
-  if (fDNS && !opts.host) {
-    fprintf(stderr, "No hostname set. Please use -h.\n");
-    exit(1);
-  }
-  if (fDNS && !opts.mbox) {
-    fprintf(stderr, "No e-mail address set. Please use -m.\n");
-    exit(1);
-  }
-  FILE *f = fopen("dnsseed.dat","r");
-  if (f) {
-    printf("Loading dnsseed.dat...");
-    CAutoFile cf(f);
-    cf >> db;
-    if (opts.fWipeBan)
-        db.banned.clear();
-    if (opts.fWipeIgnore)
-        db.ResetIgnores();
-    printf("done\n");
-  }
-  pthread_t threadDns, threadSeed, threadDump, threadStats;
-  if (fDNS) {
-    printf("Starting %i DNS threads for %s on %s (port %i)...", opts.nDnsThreads, opts.host, opts.ns, opts.nPort);
-    dnsThread.clear();
-    for (int i=0; i<opts.nDnsThreads; i++) {
-      dnsThread.push_back(new CDnsThread(&opts, i));
-      pthread_create(&threadDns, NULL, ThreadDNS, dnsThread[i]);
-      printf(".");
-      Sleep(20);
-    }
-    printf("done\n");
-  }
-  printf("Starting seeder...");
-  pthread_create(&threadSeed, NULL, ThreadSeeder, NULL);
-  printf("done\n");
-  printf("Starting %i crawler threads...", opts.nThreads);
+
+  if (!LoadConfig(opts, g_chains)) exit(1);
+  if (g_chains.empty()) { fprintf(stderr, "No chains defined in '%s'.\n", opts.config); exit(1); }
+
+  mkdir(opts.datadir, 0755);
   pthread_attr_t attr_crawler;
   pthread_attr_init(&attr_crawler);
   pthread_attr_setstacksize(&attr_crawler, 0x20000);
-  for (int i=0; i<opts.nThreads; i++) {
-    pthread_t thread;
-    pthread_create(&thread, &attr_crawler, ThreadCrawler, &opts.nThreads);
+
+  for (unsigned int ci = 0; ci < g_chains.size(); ci++) {
+    CChain* ch = g_chains[ci];
+    if (ch->port == 0) { fprintf(stderr, "[%s] missing 'port' in config\n", ch->name.c_str()); exit(1); }
+    applyChain(ch);                       // so any IsGood() during .dat load uses this chain's params
+    mkdir(ch->datadir.c_str(), 0755);
+
+    std::string datPath = ch->datadir + "/dnsseed.dat";
+    FILE *f = fopen(datPath.c_str(), "r");
+    if (f) {
+      CAutoFile cf(f);
+      cf >> ch->db;
+      if (opts.fWipeBan)    ch->db.banned.clear();
+      if (opts.fWipeIgnore) ch->db.ResetIgnores();
+    }
+
+    bool dns = !ch->host.empty() && !ch->ns.empty() && !ch->mbox.empty();
+    printf("[%s] magic=%02x%02x%02x%02x port=%u minheight=%i minversion=%i seeds=%i %s\n",
+           ch->name.c_str(), ch->magic[0], ch->magic[1], ch->magic[2], ch->magic[3],
+           ch->port, ch->minHeight, ch->minVersion, (int)ch->seeds.size(),
+           dns ? "(DNS seed)" : "(crawler-only)");
+    if (dns)
+      printf("[%s]   serving %s via %s on %s port %i\n", ch->name.c_str(), ch->host.c_str(), ch->ns.c_str(), ch->listen.c_str(), ch->dnsPort);
+
+    pthread_t t;
+    if (dns) {
+      for (int i = 0; i < ch->nDnsThreads; i++) {
+        CDnsThread* dt = new CDnsThread(ch, i);
+        ch->dnsThreads.push_back(dt);
+        pthread_create(&t, NULL, ThreadDNS, dt);
+        Sleep(20);
+      }
+    }
+    pthread_create(&t, NULL, ThreadSeeder, ch);
+    for (int i = 0; i < ch->nThreads; i++) {
+      pthread_t ct;
+      pthread_create(&ct, &attr_crawler, ThreadCrawler, ch);
+    }
+    pthread_create(&t, NULL, ThreadDumper, ch);
   }
   pthread_attr_destroy(&attr_crawler);
-  printf("done\n");
+
+  printf("Started %i chain(s) in one process.\n", (int)g_chains.size());
+  pthread_t threadStats;
   pthread_create(&threadStats, NULL, ThreadStats, NULL);
-  pthread_create(&threadDump, NULL, ThreadDumper, NULL);
-  void* res;
-  pthread_join(threadDump, &res);
+  pthread_join(threadStats, NULL);
   return 0;
 }

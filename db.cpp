@@ -3,8 +3,9 @@
 
 using namespace std;
 
-int nMinimumHeight = 0;
-int nMinPeerVersion = 70001;
+// Per-chain, thread_local (see db.h) so several chains can be crawled in one process.
+thread_local int nMinimumHeight = 0;
+thread_local int nMinPeerVersion = 70001;
 
 void CAddrInfo::Update(bool good) {
   uint32_t now = time(NULL);

@@ -15,9 +15,9 @@
 // Minimum protocol version a peer must advertise to be served as "good". Runtime
 // configurable via --minversion (per chain): WojakCoin uses ~70001, Pepecoin 70003.
 // Default 70001 stays inclusive of current nodes while filtering ancient clients.
-extern int nMinPeerVersion;
+extern thread_local int nMinPeerVersion;
 
-extern int nMinimumHeight;
+extern thread_local int nMinimumHeight;
 static inline int GetRequireHeight(const bool testnet = fTestNet)
 {
     // A peer must report at least this block height to count as "good". The
